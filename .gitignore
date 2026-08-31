@@ -1,0 +1,38 @@
+# ---- Secrets / env ----
+.env
+.env.local
+*.env
+!.env.example
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+env/
+
+# ---- Databases / checkpoints (runtime artifacts) ----
+*.sqlite
+*.sqlite3
+*.db
+hackathon_planner.db
+checkpoints.sqlite
+data/
+
+# ---- Node / frontend ----
+node_modules/
+dist/
+.vite/
+*.local
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
