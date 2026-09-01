@@ -167,6 +167,7 @@ def get_debate(
     project_id: str,
     db: Session = Depends(get_session),
     runner: WorkflowRunner = Depends(get_runner),
+    settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     _require_record(db, project_id)
     values = runner.values(project_id)
@@ -181,6 +182,8 @@ def get_debate(
         "alignment_score": values.get("alignment_score"),
         "alignment_status": values.get("alignment_status", ""),
         "alignment_history": values.get("alignment_history", []) or [],
+        "threshold": settings.alignment_threshold,
+        "max_debate_rounds": settings.max_debate_rounds,
         "debate_round": values.get("debate_round", 0),
     }
 
