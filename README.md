@@ -38,7 +38,7 @@ No other agents exist. Conflict detection, routing, cosine similarity, round cou
 
 > **Setting it up?** [`RUNNING.md`](./RUNNING.md) has step-by-step Windows/macOS commands, provider choices, and troubleshooting.
 
-## Quick start (Docker, zero API key)
+## Quick start 
 
 The stack ships with a deterministic **mock LLM** so it runs end-to-end with no key:
 
