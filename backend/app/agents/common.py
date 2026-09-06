@@ -13,12 +13,29 @@ from app.models.schemas import IdeaDraft
 
 def idea_context(idea: IdeaDraft) -> str:
     """A compact, structured description of the idea for debate agents."""
+    solution = (idea.solution or "")[:600]
     return (
         f"Title: {idea.title}\n"
         f"Problem: {idea.problem}\n"
-        f"Solution: {idea.solution}\n"
+        f"Solution: {solution}\n"
+        f"Objectives: {joined(idea.objectives)}\n"
+        f"Core features: {joined(idea.core_features)}\n"
         f"Target users: {idea.target_users}"
     )
+
+
+def team_context(team) -> str:
+    """Compact team summary (names + skills + level) for skill-aware agents."""
+    members = getattr(team, "members", []) or []
+    if not members:
+        return "unknown team"
+    parts = []
+    for m in members:
+        name = getattr(m, "name", "") or getattr(m, "role", "") or "member"
+        skills = joined(getattr(m, "skills", []), limit=6)
+        level = getattr(getattr(m, "skill_level", None), "value", "intermediate")
+        parts.append(f"{name} ({level}; skills: {skills or 'n/a'})")
+    return "; ".join(parts)
 
 
 def joined(items: List[str], limit: int = 8) -> str:

@@ -18,6 +18,7 @@ def create_project(db: Session, project_id: str, req: ProjectCreateRequest) -> P
         time_limit_hours=req.time_limit_hours,
         preferences=req.preferences,
         team_members_json=json.dumps([m.model_dump(mode="json") for m in req.team_members]),
+        using_ai=1 if req.using_ai else 0,
         status="awaiting_selection",
     )
     db.add(rec)
@@ -64,4 +65,5 @@ def to_request(rec: ProjectRecord) -> ProjectCreateRequest:
         time_limit_hours=rec.time_limit_hours,
         preferences=rec.preferences or "",
         team_members=members,
+        using_ai=bool(getattr(rec, "using_ai", 1)),
     )

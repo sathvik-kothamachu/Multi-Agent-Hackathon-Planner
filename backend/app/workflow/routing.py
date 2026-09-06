@@ -17,8 +17,10 @@ MAX_ROUNDS_EXCEEDED = "max_rounds_exceeded"
 ROUTE_FINALIZE = "finalize"
 ROUTE_REDEBATE = "redebate"
 
-# The only agents that may be targeted by a revision directive.
-VALID_AGENTS = ("tech", "timeline", "pitch")
+# The only agents that may be targeted by a revision directive. Pitch is no
+# longer part of the early debate (it is generated at the final stage), so it is
+# not a valid revision target here.
+VALID_AGENTS = ("tech", "timeline")
 
 
 def is_max_rounds(current_round: int, max_rounds: int) -> bool:

@@ -29,6 +29,12 @@ class WorkflowRunner:
 
         conn = sqlite3.connect(settings.checkpoint_db_path, check_same_thread=False)
         self.checkpointer = SqliteSaver(conn)
+        # Create the checkpoint tables up front. setup() is idempotent; some
+        # checkpoint-saver versions create tables lazily and some do not, so
+        # calling it explicitly avoids a first-invoke "no such table" 500.
+        setup = getattr(self.checkpointer, "setup", None)
+        if callable(setup):
+            setup()
         self.graph = build_graph(self.client, self.settings, self.checkpointer)
 
     # ---- config helpers ------------------------------------------------- #
@@ -50,16 +56,22 @@ class WorkflowRunner:
             "time_limit_hours": req.time_limit_hours,
             "preferences": req.preferences,
             "team_profile": profile,
+            "using_ai": req.using_ai,
             "usage_log": [],
             "alignment_history": [],
+            "idea_history": [],
         }
         self.graph.invoke(inputs, self._config(project_id))
         return self.values(project_id)
 
     def _resume(self, project_id: str, decision: dict) -> dict:
-        from langgraph.types import Command
-
-        self.graph.invoke(Command(resume=decision), self._config(project_id))
+        # Human-in-the-loop resume for langgraph 0.2.39 (static interrupt).
+        # The graph is paused at interrupt_before=["human_review"]. Write the
+        # decision into the checkpointed state, then re-invoke with no input so
+        # execution continues *at* human_review (no idea regeneration).
+        config = self._config(project_id)
+        self.graph.update_state(config, {"pending_decision": decision})
+        self.graph.invoke(None, config)
         return self.values(project_id)
 
     def regenerate(self, project_id: str) -> dict:

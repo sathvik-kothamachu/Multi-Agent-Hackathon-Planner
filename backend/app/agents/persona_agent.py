@@ -16,7 +16,10 @@ from app.models.schemas import Blueprint, PersonaAdaptedPlan, SkillLevel
 SYSTEM = (
     "You are the Persona Adapter. Given a FIXED final plan, adapt ONLY the explanation depth, "
     "terminology, and level of hand-holding to the team's skill level. Do NOT change the underlying "
-    "solution, stack, timeline, or pitch. Return PersonaAdaptedPlan JSON."
+    "solution, stack, timeline, or pitch. Beginner = very detailed and simple; intermediate = "
+    "balanced; advanced = concise and technical. Return PersonaAdaptedPlan JSON including a 'phases' "
+    "list where each phase has {name, time_allocation, technologies, guidance, expected_output, "
+    "dependencies, completion_criteria}."
 )
 
 
@@ -40,7 +43,8 @@ def adapt_persona(
         f"Stack: {', '.join(plan.recommended_stack)}\n"
         f"Timeline: {', '.join(m.name for m in plan.timeline)}\n"
         f"Value proposition: {plan.value_proposition}\n"
-        "Adapt the guidance to this persona only. Return PersonaAdaptedPlan JSON."
+        "Adapt the guidance to this persona only; keep the SAME idea, stack, and timeline. "
+        "Return PersonaAdaptedPlan JSON with a 'phases' list."
     )
     out, usage = client.generate(
         system=SYSTEM, user=user, schema=PersonaAdaptedPlan, max_output_tokens=800

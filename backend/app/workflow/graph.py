@@ -47,4 +47,9 @@ def build_graph(client, settings, checkpointer):
     g.add_edge("assemble", "persona")
     g.add_edge("persona", END)
 
-    return g.compile(checkpointer=checkpointer)
+    # interrupt_before pauses execution *before* human_review runs and
+    # checkpoints by thread_id (= project_id). The API resumes by writing the
+    # decision into state and re-invoking with no input (see WorkflowRunner).
+    # This is the human-in-the-loop primitive supported by langgraph 0.2.39
+    # (the dynamic interrupt()/Command API only exists in newer releases).
+    return g.compile(checkpointer=checkpointer, interrupt_before=["human_review"])

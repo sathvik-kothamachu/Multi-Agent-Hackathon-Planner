@@ -17,6 +17,8 @@ class ProjectRecord(Base):
     time_limit_hours = Column(Integer, default=24)
     preferences = Column(Text, default="")
     team_members_json = Column(Text, default="[]")
+    # 1 if the team plans to build with AI/LLM tooling; drives the Tech agent rule.
+    using_ai = Column(Integer, default=1)
     status = Column(String, default="started")
     # Cached single-shot baseline for the ablation: {"plan": {...}, "metrics": {...}}
     baseline_json = Column(Text, nullable=True)

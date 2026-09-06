@@ -15,12 +15,13 @@ from app.llm.base import CallUsage, LLMClient
 from app.models.schemas import ArbiterOutput
 
 SYSTEM = (
-    "You are the Debate Arbiter. You are given compact critiques (tech, timeline, pitch) of the "
+    "You are the Debate Arbiter. You are given compact critiques (tech, timeline) of the "
     "SAME idea plus the original problem. Identify MEANINGFUL conflicts between technology, timeline, "
-    "pitch, and the original requirements. For each real conflict, give a concrete resolution and set "
-    "resolved=true. Emit revision_directives ONLY for agents whose analysis must change (agent is one "
-    "of: tech, timeline, pitch). Also emit a concise 'current_solution_text' (1-2 sentences) describing "
-    "the converged solution. Do NOT invent conflicts. Return ArbiterOutput JSON."
+    "and the original requirements (e.g. technical complexity vs. available hours). For each real "
+    "conflict, give a concrete resolution and set resolved=true. Emit revision_directives ONLY for "
+    "agents whose analysis must change (agent is one of: tech, timeline). Also emit a concise "
+    "'current_solution_text' (1-2 sentences) describing the converged solution. Do NOT invent "
+    "conflicts. Return ArbiterOutput JSON."
 )
 
 
@@ -30,7 +31,6 @@ def run_arbiter(
     idea = state["selected_idea"]
     tech = state.get("tech_analysis")
     timeline = state.get("timeline_analysis")
-    pitch = state.get("pitch_analysis")
     user = (
         f"Original problem: {state['problem_statement']}\n"
         f"Time limit (hours): {state.get('time_limit_hours', 24)}\n"
@@ -40,7 +40,6 @@ def run_arbiter(
         f"Timeline: feasible={timeline.feasible}, "
         f"milestones=[{joined([m.name for m in timeline.milestones])}], "
         f"flags=[{joined(timeline.cross_domain_flags)}]\n"
-        f"Pitch: value={pitch.value_proposition}, flags=[{joined(pitch.cross_domain_flags)}]\n"
         "Return ArbiterOutput JSON."
     )
     return client.generate(

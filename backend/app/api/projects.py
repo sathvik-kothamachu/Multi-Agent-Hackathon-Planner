@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any, List, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 
 from app.agents.persona_agent import adapt_persona
@@ -26,8 +26,10 @@ from app.alignment.semantic_alignment import compute_alignment
 from app.api.deps import get_runner, get_settings_dep
 from app.baseline.evaluate import build_evaluation
 from app.baseline.single_shot import run_baseline
+from app.blueprint.export import blueprint_to_docx, blueprint_to_pdf
 from app.core.config import Settings
-from app.core.exceptions import NotFoundError, ValidationAppError
+from app.core.exceptions import AppError, NotFoundError, ValidationAppError
+from app.core.logging import get_logger
 from app.db import repository
 from app.db.database import get_session
 from app.models.schemas import (
@@ -45,6 +47,13 @@ from app.models.schemas import (
 from app.services.runner import WorkflowRunner
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+logger = get_logger(__name__)
+
+
+class ReportGenerationError(AppError):
+    """Report/document could not be rendered from the current project state."""
+
+    status_code = 500
 
 
 # --------------------------------------------------------------------------- #
@@ -74,6 +83,7 @@ def _step_response(pid: str, values: dict, runner: WorkflowRunner) -> WorkflowSt
         project_id=pid,
         status=runner.status_of(values),
         ideas=values.get("candidate_ideas") or None,
+        evaluations=values.get("idea_evaluations") or None,
         blueprint=values.get("final_plan"),
         persona_adapted_plan=values.get("persona_adapted_plan"),
         metrics=runner.metrics(values),
@@ -167,6 +177,7 @@ def get_debate(
     project_id: str,
     db: Session = Depends(get_session),
     runner: WorkflowRunner = Depends(get_runner),
+    settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     _require_record(db, project_id)
     values = runner.values(project_id)
@@ -178,10 +189,43 @@ def get_debate(
         "pitch_analysis": _dump(values.get("pitch_analysis")),
         "conflicts": [_dump(c) for c in values.get("conflicts", []) or []],
         "revision_directives": [_dump(d) for d in values.get("revision_directives", []) or []],
+        "team_allocation": [_dump(a) for a in values.get("team_allocation", []) or []],
         "alignment_score": values.get("alignment_score"),
         "alignment_status": values.get("alignment_status", ""),
         "alignment_history": values.get("alignment_history", []) or [],
+        "threshold": settings.alignment_threshold,
+        "max_debate_rounds": settings.max_debate_rounds,
         "debate_round": values.get("debate_round", 0),
+    }
+
+
+@router.get("/{project_id}/alignment")
+def get_alignment(
+    project_id: str,
+    db: Session = Depends(get_session),
+    runner: WorkflowRunner = Depends(get_runner),
+) -> dict:
+    """User-facing /100 alignment breakdown (no cosine/threshold jargon)."""
+    _require_record(db, project_id)
+    values = runner.values(project_id)
+    report = values.get("alignment_report")
+    if report is None:
+        raise NotFoundError("Alignment not ready — select an idea to run the workflow first")
+    return {"project_id": project_id, "report": _dump(report)}
+
+
+@router.get("/{project_id}/evaluations")
+def get_evaluations_view(
+    project_id: str,
+    db: Session = Depends(get_session),
+    runner: WorkflowRunner = Depends(get_runner),
+) -> dict:
+    """Advisory /100 evaluations for the current candidate ideas (no auto-select)."""
+    _require_record(db, project_id)
+    values = runner.values(project_id)
+    return {
+        "project_id": project_id,
+        "evaluations": [_dump(e) for e in values.get("idea_evaluations", []) or []],
     }
 
 
@@ -196,6 +240,78 @@ def get_blueprint(
     if not values.get("final_plan"):
         raise NotFoundError("Blueprint not ready — select an idea to run the workflow first")
     return _step_response(project_id, values, runner)
+
+
+def _blueprint_or_404(runner: WorkflowRunner, project_id: str) -> Blueprint:
+    values = runner.values(project_id)
+    if not values.get("final_plan"):
+        raise NotFoundError("Blueprint not ready — select an idea to run the workflow first")
+    try:
+        return _to_model(values["final_plan"], Blueprint)
+    except NotFoundError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — malformed checkpoint state
+        logger.exception("blueprint reconstruction failed (project=%s)", project_id)
+        raise ReportGenerationError(
+            f"Stored project data is incomplete or invalid, so the report cannot be built: {exc}"
+        ) from exc
+
+
+def _safe_name(bp: Blueprint) -> str:
+    base = (bp.project_name or bp.selected_idea.title or "blueprint").strip().lower()
+    return "".join(c if c.isalnum() else "-" for c in base).strip("-") or "blueprint"
+
+
+def _render_or_500(project_id: str, bp: Blueprint, renderer, kind: str) -> bytes:
+    """Render a document, logging the real traceback and returning a meaningful
+    error instead of an opaque 500. The underlying exception is never swallowed —
+    it is logged server-side and summarised to the client."""
+    try:
+        data = renderer(bp)
+    except ImportError as exc:  # missing python-docx / reportlab
+        logger.exception("report %s: rendering dependency missing (project=%s)", kind, project_id)
+        raise ReportGenerationError(
+            f"{kind.upper()} export needs an optional dependency that is not installed: {exc}."
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 — surface cause, don't hide it
+        logger.exception("report %s: rendering failed (project=%s)", kind, project_id)
+        raise ReportGenerationError(f"Failed to generate {kind.upper()} report: {exc}") from exc
+    if not data:
+        logger.error("report %s: renderer produced no bytes (project=%s)", kind, project_id)
+        raise ReportGenerationError(f"{kind.upper()} report was empty — nothing to download.")
+    return data
+
+
+@router.get("/{project_id}/export/docx")
+def export_docx(
+    project_id: str,
+    db: Session = Depends(get_session),
+    runner: WorkflowRunner = Depends(get_runner),
+) -> Response:
+    _require_record(db, project_id)
+    bp = _blueprint_or_404(runner, project_id)
+    data = _render_or_500(project_id, bp, blueprint_to_docx, "docx")
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{_safe_name(bp)}-blueprint.docx"'},
+    )
+
+
+@router.get("/{project_id}/export/pdf")
+def export_pdf(
+    project_id: str,
+    db: Session = Depends(get_session),
+    runner: WorkflowRunner = Depends(get_runner),
+) -> Response:
+    _require_record(db, project_id)
+    bp = _blueprint_or_404(runner, project_id)
+    data = _render_or_500(project_id, bp, blueprint_to_pdf, "pdf")
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{_safe_name(bp)}-blueprint.pdf"'},
+    )
 
 
 @router.get("/{project_id}/metrics", response_model=RunMetrics)

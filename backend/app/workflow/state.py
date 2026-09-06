@@ -9,9 +9,12 @@ from __future__ import annotations
 from typing import Dict, List, Optional, TypedDict
 
 from app.models.schemas import (
+    AlignmentReport,
     Blueprint,
     Conflict,
     IdeaDraft,
+    IdeaEvaluation,
+    MemberAllocation,
     PersonaAdaptedPlan,
     PitchAnalysis,
     RevisionDirective,
@@ -29,10 +32,21 @@ class WorkflowState(TypedDict, total=False):
     time_limit_hours: int
     preferences: str
     team_profile: TeamProfile
+    using_ai: bool
 
     # ---- ideation + human review ----
     candidate_ideas: List[IdeaDraft]
+    # Advisory /100 scores for the current candidate_ideas (one per idea), shown
+    # to the human before they select. Never used to auto-select.
+    idea_evaluations: List[IdeaEvaluation]
+    # Every idea ever generated for this project (title-keyed), so Regenerate can
+    # reject semantic/title duplicates and never return a prior idea.
+    idea_history: List[IdeaDraft]
     selected_idea: Optional[IdeaDraft]
+    # Human decision injected on resume (runner.update_state) and read by
+    # human_review_node; declared here so it is a tracked LangGraph channel.
+    pending_decision: Optional[Dict[str, object]]
+    review_action: Optional[str]
 
     # ---- debate ----
     tech_analysis: Optional[TechAnalysis]
@@ -44,11 +58,15 @@ class WorkflowState(TypedDict, total=False):
     debate_round: int
     agents_to_revise: List[str]
 
+    # ---- team allocation (deterministic, skill-matched) ----
+    team_allocation: List[MemberAllocation]
+
     # ---- alignment gate ----
     alignment_score: Optional[float]
     alignment_status: str
     alignment_history: List[Dict[str, object]]
     initial_alignment: Optional[float]
+    alignment_report: Optional[AlignmentReport]
 
     # ---- outputs ----
     final_plan: Optional[Blueprint]

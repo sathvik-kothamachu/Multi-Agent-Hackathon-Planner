@@ -10,14 +10,16 @@ from __future__ import annotations
 
 from typing import Dict
 
-from langgraph.types import interrupt
-
 from app.agents.common import append_usage
+from app.agents.evaluation_agent import evaluate_ideas
 from app.agents.idea_agent import generate_ideas
 from app.agents.persona_agent import adapt_persona
 from app.agents.pitch_agent import analyze_pitch
 from app.agents.tech_agent import analyze_tech
 from app.agents.timeline_agent import analyze_timeline
+from app.core.logging import get_logger
+from app.agents.allocation import allocate_tasks
+from app.alignment.alignment_report import build_alignment_report
 from app.alignment.semantic_alignment import compute_alignment
 from app.alignment.similarity import DRIFT
 from app.blueprint.assemble import assemble_blueprint
@@ -38,9 +40,24 @@ from app.workflow.routing import (
 # --------------------------------------------------------------------------- #
 def ideas_node(state: dict, client, settings) -> Dict:
     ideas, usage = generate_ideas(state, client, settings)
+    usages = [usage]
+    # Advisory evaluation of all ideas in ONE call so the human sees scored
+    # comparisons before selecting. Non-fatal: if it fails, the ideas still show.
+    try:
+        evaluations, eval_usage = evaluate_ideas(ideas, state, client, settings)
+        usages.append(eval_usage)
+    except Exception:  # noqa: BLE001 — evaluation is advisory, not critical
+        get_logger(__name__).exception("idea evaluation failed; showing ideas without scores")
+        evaluations = []
+    # Append the fresh ideas to the project's full history so a later Regenerate
+    # can reject anything already seen (dedup happens inside generate_ideas).
+    history = list(state.get("idea_history", []))
+    history.extend(ideas)
     return {
         "candidate_ideas": ideas,
-        "usage_log": append_usage(state, usage),
+        "idea_evaluations": evaluations,
+        "idea_history": history,
+        "usage_log": append_usage(state, *usages),
         # reset any prior debate artifacts so regenerate starts clean
         "tech_analysis": None,
         "timeline_analysis": None,
@@ -52,22 +69,22 @@ def ideas_node(state: dict, client, settings) -> Dict:
 
 
 def human_review_node(state: dict, client, settings) -> Dict:
-    """Pause for human review. Resumed with a decision dict:
+    """Human-in-the-loop gate.
+
+    The graph is compiled with interrupt_before=["human_review"], so execution
+    PAUSES before this node and is checkpointed by thread_id (= project_id).
+    The API resumes by writing the decision into state (WorkflowRunner._resume
+    -> graph.update_state) and re-invoking; this node then applies it:
 
     {"action": "select", "idea_id": "idea-2"}      -> pick a candidate
     {"action": "modify", "idea": {...}}            -> pick an edited idea
     {"action": "regenerate"}                       -> loop back to ideas
     """
-    decision = interrupt(
-        {
-            "type": "human_review",
-            "ideas": [i.model_dump() for i in state.get("candidate_ideas", [])],
-        }
-    ) or {}
+    decision = state.get("pending_decision") or {}
     action = decision.get("action", "select")
 
     if action == "regenerate":
-        return {"review_action": "regenerate"}
+        return {"review_action": "regenerate", "pending_decision": None}
 
     ideas = state.get("candidate_ideas", [])
     if action == "modify" and decision.get("idea"):
@@ -78,7 +95,7 @@ def human_review_node(state: dict, client, settings) -> Dict:
         idea_id = decision.get("idea_id")
         chosen = next((i for i in ideas if i.id == idea_id), ideas[0] if ideas else None)
 
-    return {"review_action": "proceed", "selected_idea": chosen}
+    return {"review_action": "proceed", "selected_idea": chosen, "pending_decision": None}
 
 
 def route_after_review(state: dict) -> str:
@@ -91,9 +108,12 @@ def route_after_review(state: dict) -> str:
 def debate_node(state: dict, client, settings) -> Dict:
     """Run the specialist agents + arbiter for one debate round.
 
-    First round runs all three specialists. Re-debate rounds re-run ONLY the
-    agents the arbiter asked to revise (token discipline); if the arbiter named
-    none but we still drifted, all three re-run.
+    Step 4 debate covers only the TECHNICAL and TIMELINE specialists — the two
+    domains whose conflicts (complexity vs. available hours) actually shape the
+    plan. The Pitch is intentionally NOT part of early planning; it is generated
+    once at the final stage (see assemble_node). First round runs both
+    specialists; re-debate rounds re-run ONLY the agents the arbiter flagged
+    (token discipline); if none were flagged but we still drifted, both re-run.
     """
     first_round = state.get("tech_analysis") is None
     to_revise = [] if first_round else next_agents(state.get("revision_directives", []))
@@ -110,10 +130,6 @@ def debate_node(state: dict, client, settings) -> Dict:
     if run_all or "timeline" in to_revise:
         tl, u = analyze_timeline(state, client, settings, revision=directives.get("timeline", ""))
         updates["timeline_analysis"] = tl
-        usages.append(u)
-    if run_all or "pitch" in to_revise:
-        pt, u = analyze_pitch(state, client, settings, revision=directives.get("pitch", ""))
-        updates["pitch_analysis"] = pt
         usages.append(u)
 
     # Arbiter sees the freshest analyses (existing state + this round's updates).
@@ -146,10 +162,21 @@ def alignment_node(state: dict, client, settings) -> Dict:
     history = list(state.get("alignment_history", []))
     history.append({"round": round_no, "score": result.alignment_score, "status": status})
 
+    # Deterministic user-facing /100 breakdown (no LLM, no cosine jargon).
+    report = build_alignment_report(
+        state["problem_statement"],
+        state.get("hackathon_theme", "general"),
+        state["selected_idea"],
+        state.get("tech_analysis"),
+        settings,
+        timeline=state.get("timeline_analysis"),
+    )
+
     updates: Dict = {
         "alignment_score": result.alignment_score,
         "alignment_status": status,
         "alignment_history": history,
+        "alignment_report": report,
     }
     if state.get("initial_alignment") is None:
         updates["initial_alignment"] = result.alignment_score
@@ -169,7 +196,31 @@ def route_after_alignment(state: dict, settings) -> str:
 # Finalization
 # --------------------------------------------------------------------------- #
 def assemble_node(state: dict, client, settings) -> Dict:
-    return {"final_plan": assemble_blueprint(state)}
+    # Deterministic skill-matched task allocation (no LLM), then merge everything
+    # into the complete blueprint.
+    allocation = allocate_tasks(
+        state.get("team_profile"),
+        state.get("tech_analysis"),
+        state.get("timeline_analysis"),
+    )
+    # Pitch is generated ONCE here, at the final stage — never during early
+    # debate — per the "pitch belongs to the final step" rule. If the pitch call
+    # fails we still assemble a blueprint (the pitch fields simply stay empty)
+    # rather than failing the whole run.
+    updates: Dict = {"team_allocation": allocation}
+    pitch = state.get("pitch_analysis")
+    if pitch is None:
+        try:
+            pitch, usage = analyze_pitch(state, client, settings)
+            updates["pitch_analysis"] = pitch
+            updates["usage_log"] = append_usage(state, usage)
+        except Exception:  # noqa: BLE001 — pitch is non-critical for assembly
+            get_logger(__name__).exception("final pitch generation failed; assembling without it")
+            pitch = None
+
+    merged = {**state, "team_allocation": allocation, "pitch_analysis": pitch}
+    updates["final_plan"] = assemble_blueprint(merged)
+    return updates
 
 
 def persona_node(state: dict, client, settings) -> Dict:
