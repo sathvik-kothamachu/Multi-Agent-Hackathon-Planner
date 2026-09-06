@@ -42,11 +42,7 @@ No other agents exist. Conflict detection, routing, cosine similarity, round cou
 
 The stack ships with a deterministic **mock LLM** so it runs end-to-end with no key:
 
-```bash
-docker compose up --build
-# UI:       http://localhost:8080
-# API docs: http://localhost:8000/docs
-```
+
 
 To use a real model, drop a `.env` beside `docker-compose.yml`:
 
